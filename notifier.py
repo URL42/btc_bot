@@ -1,26 +1,55 @@
 # notifier.py
 
 import os
-from dotenv import load_dotenv
 from telegram import Bot
-import asyncio
-#import logging
-#logging.basicConfig(level=logging.DEBUG)
 
-# load .env
-load_dotenv()
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
-if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-    raise ValueError("Please set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in your .env file")
+bot = Bot(token=TELEGRAM_BOT_TOKEN)
 
-bot = Bot(token=TELEGRAM_TOKEN)
+async def send_notification(result_text: str):
+    import json
 
-async def send_notification(message: str):
-    """
-    Send a message to Telegram asynchronously.
-    """
-    await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode="Markdown")
+    print("🔍 Raw LLM output:", result_text)
 
-# no __main__ block here — let main.py orchestrate it
+    try:
+        parsed = json.loads(result_text)
+    except Exception as e:
+        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="❌ Failed to parse LLM result.")
+        return
+
+    from analyze import load_history
+    history = load_history()
+
+    recommendation = parsed.get("recommendation", "N/A").upper()
+    confidence = parsed.get("confidence", "N/A")
+
+    # Handle list or string reasoning
+    raw_reasoning = parsed.get("reasoning", "")
+    if isinstance(raw_reasoning, list):
+        reasoning = "\n".join(f"• {r}" for r in raw_reasoning)
+    else:
+        reasoning = raw_reasoning.strip().replace("-", "•")
+
+    history_lines = "\n".join(
+        f"{h['date']}: {h['recommendation'].upper()} @ {h['confidence']}%"
+        for h in history
+    )
+
+    msg = f"""📈 *BTC Market Recommendation*
+
+*Recommendation:* {recommendation}
+*Confidence:* {confidence}%
+*Reasoning:*
+{reasoning}
+
+📅 *History:*
+{history_lines}
+"""
+
+    await bot.send_message(
+        chat_id=TELEGRAM_CHAT_ID,
+        text=msg,
+        parse_mode="Markdown"
+    )
