@@ -54,3 +54,39 @@ Clone the repo:
 ```bash
 git clone https://github.com/YOUR_USERNAME/btc_bot.git
 cd btc_bot
+
+Create your .env file:
+```
+OPENAI_API_KEY=your-openai-key
+TELEGRAM_BOT_TOKEN=your-telegram-bot-token
+TELEGRAM_CHAT_ID=your-telegram-chat-or-group-id
+```
+
+Install dependencies (if running locally):
+
+```
+uv pip install -r requirements.txt
+```
+
+👨‍💻 Author
+Built with ❤️ by @URL42
+Inspired by curiosity. Fueled by coffee ☕ and Bitcoin ₿
+
+🪙 **Not Financial Advice**
+This bot is a tool for informational and educational purposes only.
+Do your own research before making financial decisions.
+
+⭐ Like This Project?
+Give it a ⭐ on GitHub to show support!
+
+MIT No Attribution License (MIT-0) – With Non-Commercial Clause
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the “Software”), to deal
+in the Software without restriction, including without limitation the rights 
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies 
+of the Software, subject to the following condition:
+
+🚫 The Software may NOT be used, in whole or in part, for any **commercial purposes**.
+
+THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED.
