@@ -2,16 +2,33 @@
 
 import requests
 from bs4 import BeautifulSoup
+import time
 
 def get_coindesk_articles():
     """
     Fetch CoinDesk RSS, then visit each article to get full text.
+    Adds retry w/ backoff and User-Agent to avoid 429s.
     """
     url = "https://www.coindesk.com/arc/outboundfeeds/rss/"
-    response = requests.get(url)
-    if not response.ok:
-        raise Exception(f"Failed to fetch CoinDesk RSS: {response.status_code}")
-    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"  # simulate real browser
+    }
+
+    # Retry up to 3 times if rate limited
+    for attempt in range(3):
+        response = requests.get(url, headers=headers)
+
+        if response.status_code == 200:
+            break
+        elif response.status_code == 429:
+            wait_time = 5 * (attempt + 1)
+            print(f"⏳ Rate limited by CoinDesk (429), retrying in {wait_time}s...")
+            time.sleep(wait_time)
+        else:
+            raise Exception(f"Failed to fetch CoinDesk RSS: {response.status_code}")
+    else:
+        raise Exception("Failed to fetch CoinDesk RSS after 3 attempts")
+
     soup = BeautifulSoup(response.text, "xml")
     articles = []
 
@@ -34,7 +51,11 @@ def fetch_article_body(url):
     """
     Get the full text from a CoinDesk article page with fallback.
     """
-    response = requests.get(url, headers={"User-Agent": "trend-sentiment-bot/1.0"})
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"  # improved spoofing
+    }
+
+    response = requests.get(url, headers=headers)
     if not response.ok:
         return "Unable to fetch article content."
     
@@ -67,10 +88,11 @@ def get_reddit_bitcoin_posts():
     Scrape r/Bitcoin hot posts with titles and body text.
     """
     url = "https://www.reddit.com/r/Bitcoin/hot/.json?limit=10"
-    response = requests.get(
-        url,
-        headers={"User-Agent": "trend-sentiment-bot/1.0"},
-    )
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; BTCBot/1.0; +https://github.com/yourname/btc_bot)"
+    }
+
+    response = requests.get(url, headers=headers)
     if not response.ok:
         raise Exception(f"Failed to fetch Reddit: {response.status_code}")
     
@@ -97,6 +119,7 @@ def get_sentiment_context():
         "coindesk_articles": coindesk,
         "reddit_posts": reddit,
     }
+
 
 if __name__ == "__main__":
     sentiment = get_sentiment_context()
