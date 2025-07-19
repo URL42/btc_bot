@@ -1,4 +1,4 @@
-# file: get_group_id.py
+# file: get_group_id.py if you are looking for the telegram group ID
 from telegram.ext import ApplicationBuilder, MessageHandler, filters
 import asyncio
 import os
