@@ -95,7 +95,7 @@ Your final output must be in this exact JSON format:
 """
 
     response = client.chat.completions.create(
-        model="gpt-4.1",
+        model="gpt-5",
         messages=[
             {"role": "system", "content": "You are a Bitcoin financial analyst bot. Respond only in JSON."},
             {"role": "user", "content": prompt},
