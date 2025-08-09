@@ -3,7 +3,7 @@
 import os
 import json
 from datetime import datetime, timedelta
-from openai import OpenAI
+from openai import OpenAI, BadRequestError, APIError
 from dotenv import load_dotenv
 
 # Load environment
@@ -12,6 +12,10 @@ client = OpenAI()
 
 HISTORY_FILE = "history.json"
 HISTORY_DAYS = 7
+
+# You can override via env if you want:
+PRIMARY_MODEL = os.environ.get("ANALYSIS_MODEL", "gpt-5")
+FALLBACK_MODEL = os.environ.get("ANALYSIS_FALLBACK_MODEL", "gpt-4.1")
 
 
 def load_history():
@@ -42,6 +46,7 @@ def analyze_market(btc_history, sentiment_context):
         for h in history_entries
     ) or "No prior recommendations available."
 
+    # Focus GPT on recent window but keep your 300-day context as requested
     price_summary = "\n".join(
         f"{day['date']}: ${day['price_usd']:.2f}"
         for day in btc_history[-300:]
@@ -80,8 +85,11 @@ Your final output must be in this exact JSON format:
 
 {{
   "recommendation": "buy | hold | avoid",
-  "confidence": 0–100,
-  "reasoning": "1–4 short bullet points explaining your decision, and a final summary bullet"
+  "confidence": 0-100,
+  "reasoning": [
+    "1–4 short bullet points explaining your decision",
+    "include a final summary bullet"
+  ]
 }}
 
 --- BTC PRICE DATA ---
@@ -94,19 +102,38 @@ Your final output must be in this exact JSON format:
 {reddit_summaries}
 """
 
-    response = client.chat.completions.create(
-        model="gpt-5",
-        messages=[
-            {"role": "system", "content": "You are a Bitcoin financial analyst bot. Respond only in JSON."},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.3,
-    )
+    def call_model(model_name: str):
+        # NOTE: no temperature here — gpt-5 rejected custom values
+        return client.chat.completions.create(
+            model=model_name,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": "You are a Bitcoin financial analyst bot. Respond only in JSON."},
+                {"role": "user", "content": prompt},
+            ],
+        )
+
+    # Try primary (gpt-5), then fallback (gpt-4.1)
+    try:
+        response = call_model(PRIMARY_MODEL)
+    except (BadRequestError, APIError) as e:
+        print(f"⚠️ Primary model '{PRIMARY_MODEL}' failed: {e}. Falling back to '{FALLBACK_MODEL}'...")
+        # For gpt-4.1, temperature is allowed — keep outputs steady but not required
+        response = client.chat.completions.create(
+            model=FALLBACK_MODEL,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": "You are a Bitcoin financial analyst bot. Respond only in JSON."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.3,
+        )
 
     result = response.choices[0].message.content.strip()
     print("\n✅ GPT Analysis Result:\n")
     print(result)
 
+    # Save to history
     try:
         parsed = json.loads(result)
         save_history({
