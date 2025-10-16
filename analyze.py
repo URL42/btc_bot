@@ -322,6 +322,7 @@ def analyze_market(btc_history: Sequence[Dict], sentiment_context: Dict) -> str:
     print("\n✅ GPT Analysis Result:\n")
     print(result_text)
 
+    # Save to history
     try:
         parsed = json.loads(result_text)
         confidence_value = parsed.get("confidence", "")
