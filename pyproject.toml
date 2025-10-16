@@ -3,17 +3,12 @@ name = "btc-bot"
 version = "0.1.0"
 description = "AI bot to analyze technical trends and sentiment for buy/hold signals"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.10"
 dependencies = [
     "openai>=1.0.0",
-    "python-telegram-bot>=20.0",
+    "python-telegram-bot>=20.5",
     "beautifulsoup4>=4.12.2",
     "requests>=2.31.0",
-    "playwright>=1.39.0",   # optional, if you want to handle JS sites
-    "pydantic>=2.0.0",
     "python-dotenv>=1.0.0",
-    "schedule>=1.2.0",
-    "lxml",
-    "python-telegram-bot",
-    "asyncio"
+    "lxml>=4.9.0"
 ]

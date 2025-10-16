@@ -1,0 +1,15 @@
+[
+  {
+    "date": "2025-10-16",
+    "recommendation": "hold",
+    "confidence": 58,
+    "reasoning": [
+      "Price down 11.74% in 7d, 5.65% in 30d, and 8.85% in 90d; clear short-term downtrend.",
+      "Latest price ($108,872) is well below all major moving averages (MA7: $114k, MA30: $116k, MA90: $115k).",
+      "RSI at 29.74 signals oversold conditions, suggesting possible rebound or stabilization.",
+      "30d volatility is moderate (0.36), indicating no panic selling or extreme uncertainty.",
+      "Sentiment on Reddit remains engaged and positive despite price drop; macro news is neutral to positive for crypto infrastructure.",
+      "Summary: Downtrend and technical weakness, but oversold RSI and stable sentiment suggest waiting for clearer reversal before buying."
+    ]
+  }
+]
