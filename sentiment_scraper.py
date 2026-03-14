@@ -1,6 +1,7 @@
 # sentiment_scraper.py
 
 import time
+from datetime import datetime
 from typing import Dict, List, Optional
 
 import requests
@@ -183,15 +184,55 @@ def get_reddit_bitcoin_posts(limit: int = MAX_REDDIT_POSTS) -> List[Dict]:
     return posts
 
 
-def get_sentiment_context() -> Dict[str, List[Dict]]:
+def get_fear_and_greed(limit: int = 7) -> Dict:
     """
-    Combine CoinDesk articles with Reddit posts (titles + bodies).
+    Fetch the Crypto Fear & Greed Index from alternative.me.
+    Returns current value plus a trend list for the past `limit` days.
+    No API key required.
+    """
+    url = "https://api.alternative.me/fng/"
+    params = {"limit": limit}
+
+    try:
+        response = _request_with_retries(url, params=params, expect_json=True)
+    except RuntimeError:
+        return {"current_value": None, "current_classification": "Unavailable", "trend": []}
+
+    entries = response.json().get("data", [])
+    if not entries:
+        return {"current_value": None, "current_classification": "Unavailable", "trend": []}
+
+    trend = []
+    for entry in entries:
+        try:
+            date_str = datetime.utcfromtimestamp(int(entry["timestamp"])).strftime("%Y-%m-%d")
+        except (KeyError, TypeError, ValueError):
+            date_str = ""
+        trend.append({
+            "date": date_str,
+            "value": int(entry.get("value", 0)),
+            "classification": entry.get("value_classification", ""),
+        })
+
+    latest = trend[0]
+    return {
+        "current_value": latest["value"],
+        "current_classification": latest["classification"],
+        "trend": trend,
+    }
+
+
+def get_sentiment_context() -> Dict:
+    """
+    Combine CoinDesk articles, Reddit posts, and Fear & Greed Index.
     """
     coindesk = get_coindesk_articles()
     reddit = get_reddit_bitcoin_posts()
+    fear_and_greed = get_fear_and_greed()
     return {
         "coindesk_articles": coindesk,
         "reddit_posts": reddit,
+        "fear_and_greed": fear_and_greed,
     }
 
 

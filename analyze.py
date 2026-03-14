@@ -71,7 +71,9 @@ def _write_history(entries: Sequence[Dict]) -> None:
     tmp_path.replace(HISTORY_FILE)
 
 
-def save_history(new_entry: Dict) -> None:
+def save_history(new_entry: Dict, latest_price: Optional[float] = None) -> None:
+    if latest_price is not None:
+        new_entry = {**new_entry, "price_at_recommendation": round(latest_price, 2)}
     history = _read_history()
     history.append(new_entry)
 
@@ -193,6 +195,29 @@ def _round_optional(value: Optional[float], ndigits: int = 2) -> Optional[float]
     return round(value, ndigits)
 
 
+def _build_volume_metrics(btc_history: Sequence[Dict]) -> Dict:
+    volumes: List[float] = []
+    for day in btc_history:
+        vol = day.get("volume_usd")
+        if isinstance(vol, (int, float)) and vol > 0:
+            volumes.append(float(vol))
+
+    if not volumes:
+        return {}
+
+    current = volumes[-1]
+    avg_7d = _rolling_average(volumes, 7)
+    avg_30d = _rolling_average(volumes, 30)
+    vol_vs_30d = _percentage_change(current, avg_30d) if avg_30d else None
+
+    return {
+        "volume_today_usd": _round_optional(current, 0),
+        "avg_volume_7d_usd": _round_optional(avg_7d, 0),
+        "avg_volume_30d_usd": _round_optional(avg_30d, 0),
+        "volume_vs_30d_avg_pct": _round_optional(vol_vs_30d),
+    }
+
+
 def _summarize_articles(articles: Sequence[Dict]) -> List[Dict]:
     highlights = []
     for article in articles:
@@ -230,18 +255,27 @@ def _summarize_reddit(posts: Sequence[Dict]) -> List[Dict]:
     return highlights
 
 
-def _build_history_summary(entries: Sequence[Dict]) -> List[Dict]:
+def _build_history_summary(
+    entries: Sequence[Dict],
+    current_price: Optional[float] = None,
+) -> List[Dict]:
     summary = []
     for entry in entries:
         recommendation = entry.get("recommendation")
         confidence = entry.get("confidence")
         if not isinstance(recommendation, str):
             continue
-        summary.append({
+        item: Dict = {
             "date": entry.get("date", ""),
             "recommendation": recommendation.upper(),
             "confidence": confidence,
-        })
+        }
+        price_at = entry.get("price_at_recommendation")
+        if price_at and current_price and price_at != 0:
+            item["price_change_since_pct"] = _round_optional(
+                (current_price - price_at) / price_at * 100
+            )
+        summary.append(item)
     return summary
 
 
@@ -288,32 +322,47 @@ def _invoke_model(prompt: str) -> str:
 def analyze_market(btc_history: Sequence[Dict], sentiment_context: Dict) -> str:
     price_series = _prepare_price_series(btc_history)
     price_metrics = _build_price_metrics(price_series)
+    volume_metrics = _build_volume_metrics(btc_history)
     history_entries = load_history()
-    history_summary = _build_history_summary(history_entries)
+    history_summary = _build_history_summary(
+        history_entries,
+        current_price=price_metrics.get("latest_price"),
+    )
 
     macro_highlights = _summarize_articles(sentiment_context.get("coindesk_articles", []))
     reddit_highlights = _summarize_reddit(sentiment_context.get("reddit_posts", []))
 
     structured_payload = {
         "price_metrics": price_metrics,
+        "volume_metrics": volume_metrics,
         "recent_price_points": price_metrics.get("recent_prices", []),
         "recent_recommendations": history_summary,
+        "fear_and_greed": sentiment_context.get("fear_and_greed", {}),
         "macro_highlights": macro_highlights,
         "reddit_highlights": reddit_highlights,
     }
 
     prompt = (
-        "Evaluate the following structured Bitcoin market data and produce a JSON decision.\n"
-        "Your output must include:\n"
-        '  - "recommendation": one of ["buy", "hold", "avoid"]\n'
-        '  - "confidence": integer 0-100 expressing conviction\n'
-        '  - "reasoning": array of 3-5 concise bullet strings culminating in a summary item\n'
-        "Rules:\n"
-        "- Tie your reasoning to quantitative signals (trend, momentum, volatility) and sentiment cues provided.\n"
-        "- Reference continuation or change relative to recent recommendations when applicable.\n"
-        "- Be explicit about conflicting data or uncertainties.\n"
-        "- Keep reasoning items under 160 characters each.\n"
-        "\n"
+        "You are a Bitcoin financial analyst. Analyze the structured data below using the exact 6-step process, "
+        "then output ONLY a JSON object with this schema:\n"
+        '  {"recommendation": "buy"|"hold"|"avoid", "confidence": 0-100, "reasoning": ["<bullet>", ...]}\n'
+        "reasoning must be 3-5 strings, each under 160 characters, ending with a synthesis bullet.\n\n"
+        "=== STEP 1: TREND & MOMENTUM ===\n"
+        "Assess MA crossovers (MA7 vs MA30 vs MA90), RSI (overbought >70, oversold <30), "
+        "and % changes over 7d/30d/90d. Note direction and strength.\n\n"
+        "=== STEP 2: VOLUME ===\n"
+        "Does today's volume confirm or contradict the price move? "
+        "Rising price + rising volume = confirmed. Rising price + falling volume = suspect rally.\n\n"
+        "=== STEP 3: SENTIMENT ===\n"
+        "Evaluate the Fear & Greed current value and 7-day trend direction. "
+        "Cross-check with CoinDesk headlines and Reddit tone. Note alignment or divergence.\n\n"
+        "=== STEP 4: HISTORY & OUTCOMES ===\n"
+        "Review recent recommendations. Where price_change_since_pct is present, assess whether "
+        "prior calls were vindicated. Note any recurring pattern.\n\n"
+        "=== STEP 5: CONFLICTS ===\n"
+        "Explicitly identify any signals that contradict each other and state how you resolve them.\n\n"
+        "=== STEP 6: VERDICT ===\n"
+        "Synthesize steps 1-5 into your final recommendation, confidence, and reasoning bullets.\n\n"
         "Structured data:\n"
         f"{json.dumps(structured_payload, ensure_ascii=False, indent=2)}"
     )
@@ -342,12 +391,15 @@ def analyze_market(btc_history: Sequence[Dict], sentiment_context: Dict) -> str:
         else:
             reasoning = []
 
-        save_history({
-            "date": datetime.utcnow().strftime("%Y-%m-%d"),
-            "recommendation": parsed.get("recommendation", ""),
-            "confidence": confidence_value,
-            "reasoning": reasoning,
-        })
+        save_history(
+            {
+                "date": datetime.utcnow().strftime("%Y-%m-%d"),
+                "recommendation": parsed.get("recommendation", ""),
+                "confidence": confidence_value,
+                "reasoning": reasoning,
+            },
+            latest_price=price_metrics.get("latest_price"),
+        )
     except Exception as exc:
         print("⚠️ Could not parse/save history:", exc)
 
