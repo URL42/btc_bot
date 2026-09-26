@@ -1,7 +1,7 @@
 # sentiment_scraper.py
 
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 import requests
@@ -87,7 +87,11 @@ def get_coindesk_articles() -> List[Dict]:
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) BTCBot/1.1"
     }
 
-    rss_response = _request_with_retries(url, headers=headers)
+    try:
+        rss_response = _request_with_retries(url, headers=headers)
+    except RuntimeError as exc:
+        print(f"⚠️ CoinDesk RSS unavailable: {exc}")
+        return []
     soup = BeautifulSoup(rss_response.text, "xml")
     articles: List[Dict] = []
 
@@ -161,10 +165,9 @@ def get_reddit_bitcoin_posts(limit: int = MAX_REDDIT_POSTS) -> List[Dict]:
     try:
         response = _request_with_retries(url, headers=headers, params=params, expect_json=True)
     except RuntimeError as exc:
-        return [{
-            "title": "Failed to fetch Reddit posts",
-            "body": str(exc),
-        }]
+        # Return nothing rather than a fake post the model might read as sentiment.
+        print(f"⚠️ Reddit unavailable: {exc}")
+        return []
 
     data = response.json()
     posts = []
@@ -205,7 +208,7 @@ def get_fear_and_greed(limit: int = 7) -> Dict:
     trend = []
     for entry in entries:
         try:
-            date_str = datetime.utcfromtimestamp(int(entry["timestamp"])).strftime("%Y-%m-%d")
+            date_str = datetime.fromtimestamp(int(entry["timestamp"]), timezone.utc).strftime("%Y-%m-%d")
         except (KeyError, TypeError, ValueError):
             date_str = ""
         trend.append({

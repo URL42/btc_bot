@@ -1,7 +1,7 @@
 # trend_scraper.py
 
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List
 
 import requests
@@ -95,7 +95,7 @@ def get_btc_historical(days=350):
         if not _validate_volume_point(point):
             continue
         ts_ms, vol = point
-        date_str = datetime.utcfromtimestamp(ts_ms / 1000).strftime("%Y-%m-%d")
+        date_str = datetime.fromtimestamp(ts_ms / 1000, timezone.utc).strftime("%Y-%m-%d")
         volume_by_date[date_str] = vol
 
     # prices: [ [timestamp_ms, price], ... ]
@@ -104,7 +104,7 @@ def get_btc_historical(days=350):
         if not _validate_price_point(point):
             continue
         ts_ms, price = point
-        date_str = datetime.utcfromtimestamp(ts_ms / 1000).strftime("%Y-%m-%d")
+        date_str = datetime.fromtimestamp(ts_ms / 1000, timezone.utc).strftime("%Y-%m-%d")
         if result and result[-1]["date"] == date_str:
             # CoinGecko occasionally duplicates the most recent entry; keep the latest price.
             result[-1]["price_usd"] = price
@@ -117,8 +117,8 @@ def get_btc_historical(days=350):
         })
 
     # Guard against missing trailing days due to partial data.
-    cutoff_date = datetime.utcnow() - timedelta(days=days + 1)
-    result = [entry for entry in result if datetime.strptime(entry["date"], "%Y-%m-%d") >= cutoff_date]
+    cutoff_date = (datetime.now(timezone.utc) - timedelta(days=days + 1)).strftime("%Y-%m-%d")
+    result = [entry for entry in result if entry["date"] >= cutoff_date]
 
     return result
 
