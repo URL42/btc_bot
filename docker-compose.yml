@@ -1,0 +1,15 @@
+services:
+  btc-bot:
+    build: .
+    image: btc-bot:latest
+    container_name: btc-bot
+    working_dir: /app
+    # Run as the host user so data/history.json isn't created root-owned.
+    user: "${UID:-1000}:${GID:-1000}"
+    volumes:
+      - ./:/app
+    env_file:
+      - .env
+    extra_hosts:
+      # Lets OLLAMA_BASE_URL=http://host.docker.internal:11434 reach an Ollama on the Docker host.
+      - "host.docker.internal:host-gateway"

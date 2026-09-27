@@ -1,26 +1,43 @@
 # analyze.py
 
 import json
-from datetime import datetime, timedelta
+import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from statistics import mean, pstdev
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence
 
-from dotenv import load_dotenv
-from openai import OpenAI
-
-# Load environment (API key, etc.)
-load_dotenv()
-client = OpenAI()
+from indicators import (
+    build_price_metrics,
+    build_volume_metrics,
+    prepare_price_series,
+    quant_score,
+)
+from llm import LLMConfig, complete_json, resolve_config
+from scoring import HORIZON_DAYS, evaluate_entries
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 HISTORY_FILE = DATA_DIR / "history.json"
 
 HISTORY_DAYS = 7
-MAX_HISTORY_DAYS_STORED = 30
+# Keep a year so evaluate.py has enough calls to measure accuracy.
+MAX_HISTORY_DAYS_STORED = 365
+SCHEMA_VERSION = 2
+
+# P(up in 7d) thresholds that map the model's probability onto a label.
+BUY_THRESHOLD = float(os.getenv("BUY_THRESHOLD", "60"))
+AVOID_THRESHOLD = float(os.getenv("AVOID_THRESHOLD", "40"))
 
 DATA_DIR.mkdir(exist_ok=True)
+
+SYSTEM_PROMPT = (
+    "You are a disciplined, well-calibrated Bitcoin market analyst. "
+    "You respond with a single JSON object and nothing else."
+)
+
+
+def today_utc() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
 def _read_history() -> List[Dict]:
@@ -51,17 +68,13 @@ def _read_history() -> List[Dict]:
     return cleaned
 
 
+def _within_days(entries: Sequence[Dict], days: int) -> List[Dict]:
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+    return [entry for entry in entries if entry["date"] > cutoff]
+
+
 def load_history(days: int = HISTORY_DAYS) -> List[Dict]:
-    cutoff = datetime.utcnow() - timedelta(days=days)
-    result = []
-    for entry in _read_history():
-        try:
-            entry_date = datetime.strptime(entry["date"], "%Y-%m-%d")
-        except (KeyError, ValueError):
-            continue
-        if entry_date >= cutoff:
-            result.append(entry)
-    return result
+    return _within_days(_read_history(), days)
 
 
 def _write_history(entries: Sequence[Dict]) -> None:
@@ -72,125 +85,24 @@ def _write_history(entries: Sequence[Dict]) -> None:
 
 
 def save_history(new_entry: Dict) -> None:
-    history = _read_history()
+    """Insert or replace the entry for new_entry['date'] (one call per UTC day)."""
+    history = [e for e in _read_history() if e["date"] != new_entry["date"]]
     history.append(new_entry)
-
-    cutoff = datetime.utcnow() - timedelta(days=MAX_HISTORY_DAYS_STORED)
-    pruned = []
-    for entry in history:
-        try:
-            entry_date = datetime.strptime(entry["date"], "%Y-%m-%d")
-        except (KeyError, ValueError):
-            continue
-        if entry_date >= cutoff:
-            pruned.append(entry)
-
-    _write_history(pruned)
+    history.sort(key=lambda e: e["date"])
+    _write_history(_within_days(history, MAX_HISTORY_DAYS_STORED))
 
 
-def _prepare_price_series(btc_history: Sequence[Dict]) -> List[Tuple[str, float]]:
-    series: List[Tuple[str, float]] = []
-    for day in btc_history:
-        try:
-            date = day["date"]
-            price = float(day["price_usd"])
-        except (KeyError, TypeError, ValueError):
-            continue
-        if not isinstance(date, str):
-            continue
-        series.append((date, price))
-
-    series.sort(key=lambda item: item[0])
-    return series
+def recommendation_for(prob_up: float) -> str:
+    if prob_up >= BUY_THRESHOLD:
+        return "buy"
+    if prob_up <= AVOID_THRESHOLD:
+        return "avoid"
+    return "hold"
 
 
-def _percentage_change(current: float, previous: float) -> Optional[float]:
-    if previous == 0:
-        return None
-    return ((current - previous) / previous) * 100
-
-
-def _rolling_average(values: List[float], window: int) -> Optional[float]:
-    if len(values) < window or window <= 0:
-        return None
-    return mean(values[-window:])
-
-
-def _calculate_rsi(values: List[float], period: int = 14) -> Optional[float]:
-    if len(values) <= period:
-        return None
-    deltas = [values[i] - values[i - 1] for i in range(1, len(values))]
-    recent_deltas = deltas[-period:]
-    gains = [delta for delta in recent_deltas if delta > 0]
-    losses = [-delta for delta in recent_deltas if delta < 0]
-
-    if not gains and not losses:
-        return 50.0
-
-    average_gain = mean(gains) if gains else 0.0
-    average_loss = mean(losses) if losses else 0.0
-
-    if average_loss == 0:
-        return 100.0
-    if average_gain == 0:
-        return 0.0
-
-    rs = average_gain / average_loss
-    return 100 - (100 / (1 + rs))
-
-
-def _calculate_volatility(values: List[float], window: int = 30) -> Optional[float]:
-    if len(values) <= window:
-        return None
-    recent = values[-window:]
-    returns = []
-    for i in range(1, len(recent)):
-        if recent[i - 1] == 0:
-            continue
-        returns.append((recent[i] - recent[i - 1]) / recent[i - 1])
-    if len(returns) < 2:
-        return None
-    return pstdev(returns) * (252 ** 0.5)  # annualized volatility approximation
-
-
-def _build_price_metrics(series: List[Tuple[str, float]]) -> Dict:
-    if not series:
-        return {}
-
-    dates = [d for d, _ in series]
-    closes = [p for _, p in series]
-    latest_price = closes[-1]
-
-    def change_over(days: int) -> Optional[float]:
-        if len(closes) <= days:
-            return None
-        past_price = closes[-(days + 1)]
-        return _percentage_change(latest_price, past_price)
-
-    metrics = {
-        "latest_date": dates[-1],
-        "latest_price": round(latest_price, 2),
-        "change_7d_pct": _round_optional(change_over(7)),
-        "change_30d_pct": _round_optional(change_over(30)),
-        "change_90d_pct": _round_optional(change_over(90)),
-        "ma_7": _round_optional(_rolling_average(closes, 7)),
-        "ma_30": _round_optional(_rolling_average(closes, 30)),
-        "ma_90": _round_optional(_rolling_average(closes, 90)),
-        "rsi_14": _round_optional(_calculate_rsi(closes, 14)),
-        "volatility_30d": _round_optional(_calculate_volatility(closes, 30)),
-        "recent_prices": [
-            {"date": dates[i], "price": round(closes[i], 2)}
-            for i in range(max(0, len(closes) - 14), len(closes))
-        ],
-    }
-
-    return metrics
-
-
-def _round_optional(value: Optional[float], ndigits: int = 2) -> Optional[float]:
-    if value is None:
-        return None
-    return round(value, ndigits)
+def conviction_for(prob_up: float) -> int:
+    """0 = coin flip, 100 = certain in either direction."""
+    return int(round(abs(prob_up - 50) * 2))
 
 
 def _summarize_articles(articles: Sequence[Dict]) -> List[Dict]:
@@ -200,10 +112,9 @@ def _summarize_articles(articles: Sequence[Dict]) -> List[Dict]:
         content = article.get("content", "")
         if not title or not isinstance(title, str):
             continue
-        summary = content.strip()[:400]
         highlights.append({
             "title": title.strip(),
-            "summary": summary,
+            "summary": content.strip()[:400],
             "published": article.get("published", ""),
         })
     return highlights
@@ -211,155 +122,125 @@ def _summarize_articles(articles: Sequence[Dict]) -> List[Dict]:
 
 def _summarize_reddit(posts: Sequence[Dict]) -> List[Dict]:
     sorted_posts = sorted(
-        (
-            post for post in posts
-            if isinstance(post.get("title"), str)
-        ),
+        (post for post in posts if isinstance(post.get("title"), str)),
         key=lambda item: item.get("upvotes", 0),
         reverse=True,
     )
-
-    highlights = []
-    for post in sorted_posts[:5]:
-        highlights.append({
+    return [
+        {
             "title": post["title"].strip(),
             "body": post.get("body", "")[:400],
             "upvotes": post.get("upvotes", 0),
             "comments": post.get("comments", 0),
-        })
-    return highlights
+        }
+        for post in sorted_posts[:5]
+    ]
 
 
-def _build_history_summary(entries: Sequence[Dict]) -> List[Dict]:
-    summary = []
-    for entry in entries:
-        recommendation = entry.get("recommendation")
-        confidence = entry.get("confidence")
-        if not isinstance(recommendation, str):
-            continue
-        summary.append({
-            "date": entry.get("date", ""),
-            "recommendation": recommendation.upper(),
-            "confidence": confidence,
-        })
-    return summary
-
-
-def _invoke_model(prompt: str) -> str:
-    """
-    Prefer the Responses API for structured JSON, fall back to Chat if needed.
-    """
-    try:
-        response = client.responses.create(
-            model="gpt-4.1",
-            input=[
-                {"role": "system", "content": "You are a Bitcoin financial analyst bot. Return compact JSON only."},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.2,
-            top_p=0.9,
-            response_format={"type": "json_object"},
-        )
-        result_text = response.output_text.strip()
-        if result_text:
-            return result_text
-    except Exception as primary_error:
-        fallback_error = primary_error
-    else:
-        fallback_error = None
-
-    # Fallback for clients without Responses support.
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4.1",
-            messages=[
-                {"role": "system", "content": "You are a Bitcoin financial analyst bot. Respond only in JSON."},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.2,
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as chat_error:
-        if fallback_error:
-            raise RuntimeError("Model call failed for both Responses and Chat APIs") from chat_error
-        raise
-
-
-def analyze_market(btc_history: Sequence[Dict], sentiment_context: Dict) -> str:
-    price_series = _prepare_price_series(btc_history)
-    price_metrics = _build_price_metrics(price_series)
-    history_entries = load_history()
-    history_summary = _build_history_summary(history_entries)
-
-    macro_highlights = _summarize_articles(sentiment_context.get("coindesk_articles", []))
-    reddit_highlights = _summarize_reddit(sentiment_context.get("reddit_posts", []))
-
-    structured_payload = {
-        "price_metrics": price_metrics,
-        "recent_price_points": price_metrics.get("recent_prices", []),
-        "recent_recommendations": history_summary,
-        "macro_highlights": macro_highlights,
-        "reddit_highlights": reddit_highlights,
-    }
-
-    prompt = (
-        "Evaluate the following structured Bitcoin market data and produce a JSON decision.\n"
-        "Your output must include:\n"
-        '  - "recommendation": one of ["buy", "hold", "avoid"]\n'
-        '  - "confidence": integer 0-100 expressing conviction\n'
-        '  - "reasoning": array of 3-5 concise bullet strings culminating in a summary item\n'
-        "Rules:\n"
-        "- Tie your reasoning to quantitative signals (trend, momentum, volatility) and sentiment cues provided.\n"
-        "- Reference continuation or change relative to recent recommendations when applicable.\n"
-        "- Be explicit about conflicting data or uncertainties.\n"
-        "- Keep reasoning items under 160 characters each.\n"
-        "\n"
+def _build_prompt(payload: Dict) -> str:
+    return (
+        f"Estimate the probability (0-100) that BTC/USD will be HIGHER {HORIZON_DAYS} days from now "
+        "than latest_price, using only the structured data below.\n\n"
+        "Work through these steps privately; do not output them:\n"
+        "1. TREND & MOMENTUM: MA7/MA30/MA90 alignment, RSI-14 (Wilder; >70 overbought, <30 oversold), "
+        "7d/30d/90d % change.\n"
+        "2. VOLUME: does 24h volume vs its 30-day average confirm or contradict the recent move?\n"
+        "3. SENTIMENT: Fear & Greed level and 7-day direction, CoinDesk headlines, Reddit tone. "
+        "Extreme readings are often contrarian.\n"
+        "4. QUANT SCORE: a deterministic rule-based score from -100 (bearish) to +100 (bullish) with its "
+        "components. It is a rough summary with no proven edge in backtests; use it as a cross-check, "
+        "not an answer.\n"
+        "5. CONFLICTS: name the signals that contradict each other and how you weigh them.\n"
+        "6. TRACK RECORD: your past calls have been scored against real outcomes (Brier: lower is better, "
+        "0.25 = always saying 50). If you have been overconfident, move toward 50; if underconfident, "
+        "commit more. Do not anchor on or repeat earlier calls; judge today's data on its merits.\n\n"
+        "Calibration: BTC rises over a random 7-day window a little over half the time, and short-horizon "
+        "moves are noisy. Probabilities outside 35-65 need strong, aligned evidence, but use them when it "
+        "is there. A value near 50 is correct when evidence is genuinely mixed.\n\n"
+        "Output ONLY this JSON object:\n"
+        '{"prob_up_7d": <integer 0-100>, "reasoning": ["<bullet>", ...]}\n'
+        "reasoning: 3-5 strings, each under 160 characters; the last one is the synthesis.\n\n"
         "Structured data:\n"
-        f"{json.dumps(structured_payload, ensure_ascii=False, indent=2)}"
+        f"{json.dumps(payload, ensure_ascii=False, indent=2)}"
     )
 
-    result_text = _invoke_model(prompt)
-    print("\n✅ GPT Analysis Result:\n")
-    print(result_text)
 
-    # Save to history
+def _parse_probability(parsed: Dict) -> float:
+    value = parsed.get("prob_up_7d")
+    if isinstance(value, str):
+        value = value.strip().rstrip("%")
     try:
-        parsed = json.loads(result_text)
-        confidence_value = parsed.get("confidence", "")
-        if isinstance(confidence_value, str):
-            try:
-                confidence_value = float(confidence_value)
-            except ValueError:
-                confidence_value = confidence_value.strip()
-        if isinstance(confidence_value, float):
-            confidence_value = round(confidence_value, 1)
+        prob = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"Model response has no usable prob_up_7d: {parsed!r}")
+    if 0 < prob <= 1:
+        prob *= 100  # model answered as a fraction
+    return max(0.0, min(100.0, prob))
 
-        reasoning = parsed.get("reasoning", [])
-        if isinstance(reasoning, str):
-            reasoning = [reasoning]
-        elif isinstance(reasoning, list):
-            reasoning = [str(item) for item in reasoning]
-        else:
-            reasoning = []
 
-        save_history({
-            "date": datetime.utcnow().strftime("%Y-%m-%d"),
-            "recommendation": parsed.get("recommendation", ""),
-            "confidence": confidence_value,
-            "reasoning": reasoning,
-        })
-    except Exception as exc:
-        print("⚠️ Could not parse/save history:", exc)
+def _parse_reasoning(parsed: Dict) -> List[str]:
+    reasoning = parsed.get("reasoning", [])
+    if isinstance(reasoning, str):
+        reasoning = [reasoning]
+    elif not isinstance(reasoning, list):
+        reasoning = []
+    return [str(item).strip() for item in reasoning if str(item).strip()][:5]
 
-    return result_text
+
+def analyze_market(
+    btc_history: Sequence[Dict],
+    sentiment_context: Dict,
+    llm_config: Optional[LLMConfig] = None,
+    save: bool = True,
+) -> Dict:
+    llm_config = llm_config or resolve_config()
+
+    price_series = prepare_price_series(btc_history)
+    price_metrics = build_price_metrics(price_series)
+    volume_metrics = build_volume_metrics(btc_history)
+    fear_and_greed = sentiment_context.get("fear_and_greed", {})
+    quant = quant_score(price_metrics, volume_metrics, fear_and_greed.get("current_value"))
+    track_record = evaluate_entries(_read_history(), price_series)["summary"]
+
+    payload = {
+        "price_metrics": price_metrics,
+        "volume_metrics": volume_metrics,
+        "quant_score": quant,
+        "fear_and_greed": fear_and_greed,
+        "track_record": track_record,
+        "macro_highlights": _summarize_articles(sentiment_context.get("coindesk_articles", [])),
+        "reddit_highlights": _summarize_reddit(sentiment_context.get("reddit_posts", [])),
+    }
+
+    print(f"🧠 Querying {llm_config.label} ...")
+    parsed, raw = complete_json(SYSTEM_PROMPT, _build_prompt(payload), llm_config)
+    print("\n✅ Model output:\n")
+    print(raw)
+
+    prob_up = round(_parse_probability(parsed), 1)
+    result = {
+        "schema_version": SCHEMA_VERSION,
+        "date": today_utc(),
+        "recommendation": recommendation_for(prob_up),
+        "prob_up_7d": prob_up,
+        "confidence": conviction_for(prob_up),
+        "quant_score": quant["score"],
+        "reasoning": _parse_reasoning(parsed),
+        "price_at_recommendation": price_metrics.get("latest_price"),
+        "provider": llm_config.provider,
+        "model": llm_config.model,
+        "track_record": track_record,
+    }
+
+    if save:
+        save_history({k: v for k, v in result.items() if k != "track_record"})
+    return result
 
 
 if __name__ == "__main__":
-    from trend_scraper import get_btc_historical
-    from sentiment_scraper import get_sentiment_context
+    # Dry run: analyse without sending Telegram.
+    import sys
 
-    btc_history = get_btc_historical(days=350)
-    sentiment = get_sentiment_context()
+    from main import main
 
-    print("🧠 Analyzing market, please wait...")
-    analyze_market(btc_history, sentiment)
+    sys.exit(main(["--no-notify", *sys.argv[1:]]))

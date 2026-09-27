@@ -1,6 +1,7 @@
 # sentiment_scraper.py
 
 import time
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 import requests
@@ -86,7 +87,11 @@ def get_coindesk_articles() -> List[Dict]:
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) BTCBot/1.1"
     }
 
-    rss_response = _request_with_retries(url, headers=headers)
+    try:
+        rss_response = _request_with_retries(url, headers=headers)
+    except RuntimeError as exc:
+        print(f"⚠️ CoinDesk RSS unavailable: {exc}")
+        return []
     soup = BeautifulSoup(rss_response.text, "xml")
     articles: List[Dict] = []
 
@@ -160,10 +165,9 @@ def get_reddit_bitcoin_posts(limit: int = MAX_REDDIT_POSTS) -> List[Dict]:
     try:
         response = _request_with_retries(url, headers=headers, params=params, expect_json=True)
     except RuntimeError as exc:
-        return [{
-            "title": "Failed to fetch Reddit posts",
-            "body": str(exc),
-        }]
+        # Return nothing rather than a fake post the model might read as sentiment.
+        print(f"⚠️ Reddit unavailable: {exc}")
+        return []
 
     data = response.json()
     posts = []
@@ -183,15 +187,55 @@ def get_reddit_bitcoin_posts(limit: int = MAX_REDDIT_POSTS) -> List[Dict]:
     return posts
 
 
-def get_sentiment_context() -> Dict[str, List[Dict]]:
+def get_fear_and_greed(limit: int = 7) -> Dict:
     """
-    Combine CoinDesk articles with Reddit posts (titles + bodies).
+    Fetch the Crypto Fear & Greed Index from alternative.me.
+    Returns current value plus a trend list for the past `limit` days.
+    No API key required.
+    """
+    url = "https://api.alternative.me/fng/"
+    params = {"limit": limit}
+
+    try:
+        response = _request_with_retries(url, params=params, expect_json=True)
+    except RuntimeError:
+        return {"current_value": None, "current_classification": "Unavailable", "trend": []}
+
+    entries = response.json().get("data", [])
+    if not entries:
+        return {"current_value": None, "current_classification": "Unavailable", "trend": []}
+
+    trend = []
+    for entry in entries:
+        try:
+            date_str = datetime.fromtimestamp(int(entry["timestamp"]), timezone.utc).strftime("%Y-%m-%d")
+        except (KeyError, TypeError, ValueError):
+            date_str = ""
+        trend.append({
+            "date": date_str,
+            "value": int(entry.get("value", 0)),
+            "classification": entry.get("value_classification", ""),
+        })
+
+    latest = trend[0]
+    return {
+        "current_value": latest["value"],
+        "current_classification": latest["classification"],
+        "trend": trend,
+    }
+
+
+def get_sentiment_context() -> Dict:
+    """
+    Combine CoinDesk articles, Reddit posts, and Fear & Greed Index.
     """
     coindesk = get_coindesk_articles()
     reddit = get_reddit_bitcoin_posts()
+    fear_and_greed = get_fear_and_greed()
     return {
         "coindesk_articles": coindesk,
         "reddit_posts": reddit,
+        "fear_and_greed": fear_and_greed,
     }
 
 

@@ -1,0 +1,7 @@
+# Runtime deps for the Docker image; keep in sync with pyproject.toml.
+openai>=1.0.0
+python-telegram-bot>=20.5
+beautifulsoup4>=4.12.2
+requests>=2.31.0
+python-dotenv>=1.0.0
+lxml>=4.9.0

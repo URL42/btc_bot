@@ -1,7 +1,7 @@
 # trend_scraper.py
 
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List
 
 import requests
@@ -61,10 +61,20 @@ def _validate_price_point(point: List) -> bool:
     return isinstance(ts_ms, (int, float)) and isinstance(price, (int, float))
 
 
+def _validate_volume_point(point: List) -> bool:
+    """
+    Ensure the volume point has the expected [timestamp_ms, volume] structure.
+    """
+    if not isinstance(point, list) or len(point) != 2:
+        return False
+    ts_ms, vol = point
+    return isinstance(ts_ms, (int, float)) and isinstance(vol, (int, float))
+
+
 def get_btc_historical(days=350):
     """
-    Fetch BTC daily closing prices over the past N days from CoinGecko.
-    Returns a list of dicts with date + price.
+    Fetch BTC daily closing prices and volumes over the past N days from CoinGecko.
+    Returns a list of dicts with date, price_usd, and volume_usd.
     """
     url = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
     params = {
@@ -74,9 +84,19 @@ def get_btc_historical(days=350):
     }
     data = _request_with_retries(url, params)
     prices = data.get("prices", [])
+    volumes = data.get("total_volumes", [])
 
     if not isinstance(prices, list) or not prices:
         raise ValueError("CoinGecko response missing price data")
+
+    # Build volume lookup by date string (last write wins, matching price dedup behaviour)
+    volume_by_date: Dict[str, float] = {}
+    for point in volumes:
+        if not _validate_volume_point(point):
+            continue
+        ts_ms, vol = point
+        date_str = datetime.fromtimestamp(ts_ms / 1000, timezone.utc).strftime("%Y-%m-%d")
+        volume_by_date[date_str] = vol
 
     # prices: [ [timestamp_ms, price], ... ]
     result = []
@@ -84,19 +104,21 @@ def get_btc_historical(days=350):
         if not _validate_price_point(point):
             continue
         ts_ms, price = point
-        date_str = datetime.utcfromtimestamp(ts_ms / 1000).strftime("%Y-%m-%d")
+        date_str = datetime.fromtimestamp(ts_ms / 1000, timezone.utc).strftime("%Y-%m-%d")
         if result and result[-1]["date"] == date_str:
             # CoinGecko occasionally duplicates the most recent entry; keep the latest price.
             result[-1]["price_usd"] = price
+            result[-1]["volume_usd"] = volume_by_date.get(date_str)
             continue
         result.append({
             "date": date_str,
-            "price_usd": price
+            "price_usd": price,
+            "volume_usd": volume_by_date.get(date_str),
         })
 
     # Guard against missing trailing days due to partial data.
-    cutoff_date = datetime.utcnow() - timedelta(days=days + 1)
-    result = [entry for entry in result if datetime.strptime(entry["date"], "%Y-%m-%d") >= cutoff_date]
+    cutoff_date = (datetime.now(timezone.utc) - timedelta(days=days + 1)).strftime("%Y-%m-%d")
+    result = [entry for entry in result if entry["date"] >= cutoff_date]
 
     return result
 
